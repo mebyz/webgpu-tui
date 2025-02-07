@@ -12,7 +12,7 @@ tauri-build = { version = "2.0.5", features = [] }
 
 [dependencies]
 # Updated to latest 2.x version with correct feature set
-tauri = { version = "2.0.5", features = [ "window-all" ] }
+tauri = { version = "2.0.5" }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 wgpu = "0.17"
