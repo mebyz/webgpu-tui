@@ -1,0 +1,926 @@
+// Import Tauri API
+import { appWindow } from '@tauri-apps/api/window';
+
+const TextAttr = {
+    NORMAL: 0,
+    BOLD: 1,
+    ITALIC: 2,
+    UNDERLINE: 4
+};
+
+const MIRC_COLORS = [
+    [1.0, 1.0, 1.0, 1.0], // White
+    [0.0, 0.0, 0.0, 1.0], // Black
+    [0.0, 0.0, 0.8, 1.0], // Blue
+    [0.0, 0.8, 0.0, 1.0], // Green
+    [1.0, 0.0, 0.0, 1.0], // Red
+    [0.8, 0.0, 0.0, 1.0], // Brown
+    [0.8, 0.0, 0.8, 1.0], // Purple
+    [1.0, 0.8, 0.0, 1.0], // Orange
+    [1.0, 1.0, 0.0, 1.0], // Yellow
+    [0.0, 1.0, 0.0, 1.0], // Light Green
+    [0.0, 0.8, 0.8, 1.0], // Cyan
+    [0.0, 1.0, 1.0, 1.0], // Light Cyan
+    [0.0, 0.0, 1.0, 1.0], // Light Blue
+    [1.0, 0.0, 1.0, 1.0], // Pink
+    [0.8, 0.8, 0.8, 1.0], // Grey
+    [0.9, 0.9, 0.9, 1.0], // Light Grey
+];
+
+class Window {
+    constructor(x, y, width, height, title) {
+        this.x = x;
+        this.y = y;
+        this.width = width;
+        this.height = height;
+        this.title = title;
+        this.content = [];
+        this.isDragging = false;
+        this.dragOffsetX = 0;
+        this.dragOffsetY = 0;
+        this.focused = false;
+    }
+
+    startDrag(mouseX, mouseY) {
+        this.isDragging = true;
+        this.dragOffsetX = mouseX - this.x;
+        this.dragOffsetY = mouseY - this.y;
+        this.focused = true;
+    }
+
+    drag(mouseX, mouseY) {
+        if (this.isDragging) {
+            this.x = mouseX - this.dragOffsetX;
+            this.y = mouseY - this.dragOffsetY;
+        }
+    }
+
+    stopDrag() {
+        this.isDragging = false;
+    }
+
+    isInTitleBar(x, y) {
+        return y === this.y && x >= this.x && x < this.x + this.width;
+    }
+
+    contains(x, y) {
+        return x >= this.x && x < this.x + this.width &&
+               y >= this.y && y < this.y + this.height;
+    }
+}
+
+class EnhancedWindow extends Window {
+    constructor(x, y, width, height, title) {
+        super(x, y, width, height, title);
+        this.content = [];
+    }
+
+    drawBorders(tui) {
+        const borderColor = this.focused ? [0.4, 0.6, 1.0, 1.0] : [0.5, 0.5, 0.5, 1.0];
+        const titleColor = this.focused ? [1.0, 1.0, 1.0, 1.0] : [0.8, 0.8, 0.8, 1.0];
+        const bgColor = [0.2, 0.2, 0.25, 1.0];
+
+        // Fill background
+        for (let y = this.y + 1; y < this.y + this.height - 1; y++) {
+            for (let x = this.x + 1; x < this.x + this.width - 1; x++) {
+                tui.setText(x, y, ' ', bgColor);
+            }
+        }
+
+        // Draw title bar with gradient effect
+        const titleBg = this.focused ? [0.2, 0.3, 0.5, 1.0] : [0.2, 0.2, 0.2, 1.0];
+        for (let x = this.x; x < this.x + this.width; x++) {
+            tui.setText(x, this.y, ' ', titleBg);
+        }
+
+        // Draw window title with shadow effect
+        const centeredTitleX = this.x + Math.floor((this.width - this.title.length) / 2);
+        tui.setText(centeredTitleX, this.y, this.title, titleColor, TextAttr.BOLD);
+
+        // Draw borders
+        tui.setText(this.x, this.y, '┌', borderColor);
+        tui.setText(this.x + this.width - 1, this.y, '┐', borderColor);
+        tui.setText(this.x, this.y + this.height - 1, '└', borderColor);
+        tui.setText(this.x + this.width - 1, this.y + this.height - 1, '┘', borderColor);
+
+        // Draw horizontal borders
+        for (let x = this.x + 1; x < this.x + this.width - 1; x++) {
+            tui.setText(x, this.y, '─', borderColor);
+            tui.setText(x, this.y + this.height - 1, '─', borderColor);
+        }
+
+        // Draw vertical borders
+        for (let y = this.y + 1; y < this.y + this.height - 1; y++) {
+            tui.setText(this.x, y, '│', borderColor);
+            tui.setText(this.x + this.width - 1, y, '│', borderColor);
+        }
+    }
+
+    addText(text, color = MIRC_COLORS[0], attributes = TextAttr.NORMAL) {
+        this.content.push({
+            text: text,
+            color: color,
+            attributes: attributes
+        });
+
+        const maxLines = this.height - 2;
+        if (this.content.length > maxLines) {
+            this.content = this.content.slice(-maxLines);
+        }
+    }
+
+    clearContent() {
+        this.content = [];
+    }
+}
+
+class WebGPUTUI {
+    constructor(canvas, width, height) {
+        this.canvas = canvas;
+        this.width = width;
+        this.height = height;
+        this.device = null;
+        this.context = null;
+        this.pipeline = null;
+        this.fontTexture = null;
+        this.sampler = null;
+        this.textGrid = Array(height).fill().map(() => Array(width).fill(' '));
+        this.colorGrid = Array(height).fill().map(() => Array(width).fill([1.0, 1.0, 1.0, 1.0]));
+        this.attrGrid = Array(height).fill().map(() => Array(width).fill(TextAttr.NORMAL));
+        this.windows = [];
+        this.animations = new Map();
+        this.setupMouseHandling();
+    }
+
+    clearScreen() {
+        for (let y = 0; y < this.height; y++) {
+            for (let x = 0; x < this.width; x++) {
+                this.textGrid[y][x] = ' ';
+                this.colorGrid[y][x] = [1.0, 1.0, 1.0, 1.0];
+                this.attrGrid[y][x] = TextAttr.NORMAL;
+            }
+        }
+    }
+
+    setupMouseHandling() {
+        let activeWindow = null;
+
+        this.canvas.addEventListener('mousedown', (e) => {
+            const rect = this.canvas.getBoundingClientRect();
+            const cellWidth = rect.width / this.width;
+            const cellHeight = rect.height / this.height;
+            const x = Math.floor((e.clientX - rect.left) / cellWidth);
+            const y = Math.floor((e.clientY - rect.top) / cellHeight);
+
+            for (let i = this.windows.length - 1; i >= 0; i--) {
+                const window = this.windows[i];
+                if (y === window.y && x >= window.x && x < window.x + window.width) {
+                    activeWindow = window;
+                    window.startDrag(x, y);
+                    this.windows.splice(i, 1);
+                    this.windows.push(window);
+                    break;
+                }
+            }
+        });
+
+        this.canvas.addEventListener('mousemove', (e) => {
+            if (!activeWindow) return;
+
+            const rect = this.canvas.getBoundingClientRect();
+            const cellWidth = rect.width / this.width;
+            const cellHeight = rect.height / this.height;
+            const x = Math.floor((e.clientX - rect.left) / cellWidth);
+            const y = Math.floor((e.clientY - rect.top) / cellHeight);
+
+            const newX = Math.max(0, Math.min(x - activeWindow.dragOffsetX, this.width - activeWindow.width));
+            const newY = Math.max(0, Math.min(y - activeWindow.dragOffsetY, this.height - activeWindow.height));
+            
+            activeWindow.x = newX;
+            activeWindow.y = newY;
+        });
+
+        this.canvas.addEventListener('mouseup', () => {
+            if (activeWindow) {
+                activeWindow.stopDrag();
+                activeWindow = null;
+            }
+        });
+
+        this.canvas.addEventListener('mouseleave', () => {
+            if (activeWindow) {
+                activeWindow.stopDrag();
+                activeWindow = null;
+            }
+        });
+    }
+
+    async initialize() {
+        if (!navigator.gpu) {
+            throw new Error('WebGPU not supported');
+        }
+
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+            throw new Error('No appropriate GPU adapter found');
+        }
+
+        this.device = await adapter.requestDevice();
+        this.context = this.canvas.getContext('webgpu');
+
+        const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+        this.context.configure({
+            device: this.device,
+            format: canvasFormat,
+            alphaMode: 'premultiplied',
+        });
+
+        this.fontTexture = createEnhancedFontTexture(this.device);
+        this.sampler = this.device.createSampler({
+            magFilter: 'nearest',
+            minFilter: 'nearest',
+        });
+
+        const shaderCode = `
+            struct VertexOutput {
+                @builtin(position) position: vec4f,
+                @location(0) texCoord: vec2f,
+                @location(1) color: vec4f,
+                @location(2) charCoord: vec2f,
+                @location(3) attributes: f32,
+            };
+
+            @group(0) @binding(0) var<uniform> fontAtlas: vec4f;
+            @group(0) @binding(1) var fontTexture: texture_2d<f32>;
+            @group(0) @binding(2) var fontSampler: sampler;
+
+            @vertex
+            fn vertexMain(
+                @location(0) position: vec2f,
+                @location(1) texCoord: vec2f,
+                @location(2) color: vec4f,
+                @location(3) charCoord: vec2f,
+                @location(4) attributes: f32,
+            ) -> VertexOutput {
+                var output: VertexOutput;
+                output.position = vec4f(position, 0.0, 1.0);
+                output.texCoord = texCoord;
+                output.color = color;
+                output.charCoord = charCoord;
+                output.attributes = attributes;
+                return output;
+            }
+
+            @fragment
+            fn fragmentMain(
+                @location(0) texCoord: vec2f,
+                @location(1) color: vec4f,
+                @location(2) charCoord: vec2f,
+                @location(3) attributes: f32,
+            ) -> @location(0) vec4f {
+                let charPos = charCoord + texCoord * vec2f(1.0/16.0, 1.0/16.0);
+                let fontColor = textureSample(fontTexture, fontSampler, charPos);
+                
+                let alpha = color.a;
+                if (fontColor.r > 0.5) {
+                    return vec4f(color.rgb, alpha);
+                } else {
+                    return vec4f(color.rgb * 0.2, alpha);
+                }
+            }
+        `;
+
+        const shaderModule = this.device.createShaderModule({
+            code: shaderCode
+        });
+
+        const bindGroupLayout = this.device.createBindGroupLayout({
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    buffer: { type: 'uniform' }
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    texture: { sampleType: 'float' }
+                },
+                {
+                    binding: 2,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    sampler: { type: 'filtering' }
+                }
+            ]
+        });
+
+        const pipelineLayout = this.device.createPipelineLayout({
+            bindGroupLayouts: [bindGroupLayout]
+        });
+
+        this.pipeline = this.device.createRenderPipeline({
+            layout: pipelineLayout,
+            vertex: {
+                module: shaderModule,
+                entryPoint: 'vertexMain',
+                buffers: [
+                    {
+                        arrayStride: 44,
+                        attributes: [
+                            {
+                                shaderLocation: 0,
+                                offset: 0,
+                                format: 'float32x2',
+                            },
+                            {
+                                shaderLocation: 1,
+                                offset: 8,
+                                format: 'float32x2',
+                            },
+                            {
+                                shaderLocation: 2,
+                                offset: 16,
+                                format: 'float32x4',
+                            },
+                            {
+                                shaderLocation: 3,
+                                offset: 32,
+                                format: 'float32x2',
+                            },
+                            {
+                                shaderLocation: 4,
+                                offset: 40,
+                                format: 'float32',
+                            }
+                        ],
+                    },
+                ],
+            },
+            fragment: {
+                module: shaderModule,
+                entryPoint: 'fragmentMain',
+                targets: [
+                    {
+                        format: canvasFormat,
+                        blend: {
+                            color: {
+                                srcFactor: 'src-alpha',
+                                dstFactor: 'one-minus-src-alpha',
+                            },
+                            alpha: {
+                                srcFactor: 'src-alpha',
+                                dstFactor: 'one-minus-src-alpha',
+                            },
+                        },
+                    },
+                ],
+            },
+            primitive: {
+                topology: 'triangle-list',
+            },
+        });
+
+        this.uniformBuffer = this.device.createBuffer({
+            size: 16,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+
+        this.device.queue.writeBuffer(
+            this.uniformBuffer,
+            0,
+            new Float32Array([8/128, 16/128, 0, 0])
+        );
+
+        this.bindGroup = this.device.createBindGroup({
+            layout: bindGroupLayout,
+            entries: [
+                {
+                    binding: 0,
+                    resource: { buffer: this.uniformBuffer }
+                },
+                {
+                    binding: 1,
+                    resource: this.fontTexture.createView()
+                },
+                {
+                    binding: 2,
+                    resource: this.sampler
+                }
+            ]
+        });
+    }
+
+    createWindow(x, y, width, height, title) {
+        const window = new EnhancedWindow(x, y, width, height, title);
+        this.windows.push(window);
+        return window;
+    }
+
+    addAnimation(id, duration, updateFn) {
+        const startTime = performance.now();
+        this.animations.set(id, {
+            startTime,
+            duration,
+            updateFn
+        });
+    }
+
+    updateAnimations() {
+        const currentTime = performance.now();
+        for (const [id, animation] of this.animations.entries()) {
+            const progress = (currentTime - animation.startTime) / animation.duration;
+            if (progress >= 1) {
+                this.animations.delete(id);
+            } else {
+                animation.updateFn(progress);
+            }
+        }
+    }
+
+    drawWindow(window) {
+        const bgColor = window.focused ? [0.15, 0.15, 0.2, 1.0] : [0.1, 0.1, 0.15, 1.0];
+        const borderColor = window.focused ? [0.4, 0.6, 1.0, 1.0] : [0.3, 0.3, 0.3, 1.0];
+        const titleColor = window.focused ? [1.0, 1.0, 1.0, 1.0] : [0.7, 0.7, 0.7, 1.0];
+
+        // Fill background
+        for (let y = window.y + 1; y < window.y + window.height - 1; y++) {
+            for (let x = window.x + 1; x < window.x + window.width - 1; x++) {
+                this.setText(x, y, ' ', bgColor);
+            }
+        }
+
+        // Draw title bar
+        for (let x = window.x; x < window.x + window.width; x++) {
+            this.setText(x, window.y, ' ', [0.2, 0.3, 0.4, 1.0]);
+        }
+
+        // Draw centered title
+        const titleX = window.x + Math.floor((window.width - window.title.length) / 2);
+        this.setText(titleX, window.y, window.title, titleColor, TextAttr.BOLD);
+
+        // Draw borders
+        this.setText(window.x, window.y, '┌', borderColor);
+        for (let x = window.x + 1; x < window.x + window.width - 1; x++) {
+            this.setText(x, window.y, '─', borderColor);
+        }
+        this.setText(window.x + window.width - 1, window.y, '┐', borderColor);
+
+        for (let y = window.y + 1; y < window.y + window.height - 1; y++) {
+            this.setText(window.x, y, '│', borderColor);
+            this.setText(window.x + window.width - 1, y, '│', borderColor);
+        }
+
+        this.setText(window.x, window.y + window.height - 1, '└', borderColor);
+        for (let x = window.x + 1; x < window.x + window.width - 1; x++) {
+            this.setText(x, window.y + window.height - 1, '─', borderColor);
+        }
+        this.setText(window.x + window.width - 1, window.y + window.height - 1, '┘', borderColor);
+    }
+
+    setText(x, y, text, color = MIRC_COLORS[0], attributes = TextAttr.NORMAL) {
+        if (y >= 0 && y < this.height) {
+            const chars = [...text];
+            for (let i = 0; i < chars.length; i++) {
+                if (x + i >= 0 && x + i < this.width) {
+                    this.textGrid[y][x + i] = chars[i];
+                    this.colorGrid[y][x + i] = color;
+                    this.attrGrid[y][x + i] = attributes;
+                }
+            }
+        }
+    }
+
+    createCharQuad(char, x, y, color, attributes = TextAttr.NORMAL) {
+        const cellWidth = 2.0 / this.width;
+        const cellHeight = 2.0 / this.height;
+        const xPos = (x / this.width) * 2 - 1;
+        const yPos = 1 - (y / this.height) * 2;
+
+        let charCode = char.charCodeAt(0);
+        if (charCode > 127) {
+            switch (char) {
+                case '┌': charCode = 201; break;
+                case '┐': charCode = 187; break;
+                case '└': charCode = 200; break;
+                case '┘': charCode = 188; break;
+                case '│': charCode = 186; break;
+                case '─': charCode = 205; break;
+                default: charCode = 32;
+            }
+        }
+        
+        const charX = (charCode % 16) / 16;
+        const charY = Math.floor(charCode / 16) / 16;
+
+        return new Float32Array([
+            // Triangle 1
+            xPos, yPos,                 // position
+            0, 0,                       // texCoord
+            color[0], color[1], color[2], color[3],  // color
+            charX, charY,               // charCoord
+            attributes,                 // attributes
+
+            xPos + cellWidth, yPos,
+            1, 0,
+            color[0], color[1], color[2], color[3],
+            charX, charY,
+            attributes,
+
+            xPos, yPos - cellHeight,
+            0, 1,
+            color[0], color[1], color[2], color[3],
+            charX, charY,
+            attributes,
+
+            // Triangle 2
+            xPos + cellWidth, yPos,
+            1, 0,
+            color[0], color[1], color[2], color[3],
+            charX, charY,
+            attributes,
+
+            xPos + cellWidth, yPos - cellHeight,
+            1, 1,
+            color[0], color[1], color[2], color[3],
+            charX, charY,
+            attributes,
+
+            xPos, yPos - cellHeight,
+            0, 1,
+            color[0], color[1], color[2], color[3],
+            charX, charY,
+            attributes
+        ]);
+    }
+
+    async render() {
+        this.clearScreen();
+        
+        for (const window of this.windows) {
+            if (window instanceof EnhancedWindow) {
+                window.drawBorders(this);
+            } else {
+                this.drawWindow(window);
+            }
+
+            if (window.content) {
+                const startX = window.x + 1;
+                const startY = window.y + 1;
+                const contentWidth = window.width - 2;
+                const contentHeight = window.height - 2;
+
+                for (let i = 0; i < Math.min(window.content.length, contentHeight); i++) {
+                    const line = window.content[i];
+                    if (line) {
+                        this.setText(
+                            startX,
+                            startY + i,
+                            line.text || line,
+                            line.color || MIRC_COLORS[0],
+                            line.attributes || TextAttr.NORMAL
+                        );
+                    }
+                }
+            }
+
+            if (window.title === "Input" && this.inputHandler) {
+                this.inputHandler.updateInputDisplay();
+            }
+        }
+
+        if (this.standaloneText) {
+            for (const textItem of this.standaloneText) {
+                this.setText(
+                    textItem.x,
+                    textItem.y,
+                    textItem.text,
+                    textItem.color || MIRC_COLORS[0],
+                    textItem.attributes || TextAttr.NORMAL
+                );
+            }
+        }
+
+        const commandEncoder = this.device.createCommandEncoder();
+        const textureView = this.context.getCurrentTexture().createView();
+
+        const renderPassDescriptor = {
+            colorAttachments: [
+                {
+                    view: textureView,
+                    clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+                    loadOp: 'clear',
+                    storeOp: 'store',
+                },
+            ],
+        };
+
+        const passEncoder = commandEncoder.beginRenderPass(renderPassDescriptor);
+        passEncoder.setPipeline(this.pipeline);
+        passEncoder.setBindGroup(0, this.bindGroup);
+
+        for (let y = 0; y < this.height; y++) {
+            for (let x = 0; x < this.width; x++) {
+                const char = this.textGrid[y][x];
+                const color = this.colorGrid[y][x];
+                const attr = this.attrGrid[y][x];
+                
+                const vertexData = this.createCharQuad(
+                    char === ' ' ? '\u00A0' : char,
+                    x, 
+                    y, 
+                    color,
+                    attr
+                );
+                
+                const buffer = this.device.createBuffer({
+                    size: vertexData.byteLength,
+                    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+                });
+                
+                this.device.queue.writeBuffer(buffer, 0, vertexData);
+                passEncoder.setVertexBuffer(0, buffer);
+                passEncoder.draw(6, 1, 0, 0);
+            }
+        }
+
+        passEncoder.end();
+        this.device.queue.submit([commandEncoder.finish()]);
+    }
+}
+
+function createEnhancedFontTexture(device) {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const charWidth = 48;
+    const charHeight = 48;
+    canvas.width = charWidth * 16;
+    canvas.height = charHeight * 16;
+    
+    ctx.fillStyle = 'black';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 36px monospace';
+    ctx.fillStyle = 'white';
+
+    for (let i = 0; i < 128; i++) {
+        const x = (i % 16) * charWidth + charWidth/2;
+        const y = Math.floor(i / 16) * charHeight + charHeight/2;
+        
+        if (i >= 32) { // Printable ASCII characters
+            ctx.fillText(String.fromCharCode(i), x, y);
+        }
+    }
+
+    const boxChars = '┌┐└┘│─';
+    for (let i = 0; i < boxChars.length; i++) {
+        const code = boxChars.charCodeAt(i);
+        const x = (code % 16) * charWidth + charWidth/2;
+        const y = Math.floor(code / 16) * charHeight + charHeight/2;
+        ctx.fillText(boxChars[i], x, y);
+    }
+
+    // Debug: draw grid lines
+    ctx.strokeStyle = 'rgba(255, 0, 0, 0.2)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 16; i++) {
+        ctx.beginPath();
+        ctx.moveTo(i * charWidth, 0);
+        ctx.lineTo(i * charWidth, canvas.height);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(0, i * charHeight);
+        ctx.lineTo(canvas.width, i * charHeight);
+        ctx.stroke();
+    }
+
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = new Uint8Array(imageData.data);
+
+    const texture = device.createTexture({
+        size: [canvas.width, canvas.height, 1],
+        format: 'rgba8unorm',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.STORAGE
+    });
+
+    device.queue.writeTexture(
+        { texture: texture },
+        data,
+        { bytesPerRow: canvas.width * 4 },
+        [canvas.width, canvas.height]
+    );
+
+    return texture;
+}
+
+class InputHandler {
+    constructor(tui) {
+        this.tui = tui;
+        this.inputBuffer = '';
+        this.cursorPosition = 0;
+        this.inputHistory = [];
+        this.historyIndex = -1;
+        this.setupKeyboardHandling();
+        this.setupMouseHandling();
+        
+        // Get reference to main chat window
+        this.mainWindow = this.tui.windows.find(w => w.title === "Main Chat");
+        this.currentLine = 7; // Start after welcome messages
+    }
+
+    handleEnter() {
+        if (this.inputBuffer.trim()) {
+            // Add to input history
+            this.inputHistory.push(this.inputBuffer);
+            this.historyIndex = -1;
+
+            // Process the message
+            if (this.inputBuffer.startsWith('/')) {
+                this.processCommand(this.inputBuffer);
+            } else {
+                this.displayMessage(`<User> ${this.inputBuffer}`, [1.0, 1.0, 1.0, 1.0]);
+            }
+
+            // Clear input
+            this.inputBuffer = '';
+            this.cursorPosition = 0;
+            this.updateInputDisplay();
+        }
+    }
+
+    processCommand(command) {
+        const [cmd, ...args] = command.slice(1).split(' ');
+        switch (cmd.toLowerCase()) {
+            case 'me':
+                this.displayMessage(`* User ${args.join(' ')}`, [0.7, 0.7, 1.0, 1.0]);
+                break;
+            case 'clear':
+                if (this.mainWindow) {
+                    this.mainWindow.clearContent();
+                }
+                break;
+            default:
+                this.displayMessage(`Unknown command: ${cmd}`, [1.0, 0.3, 0.3, 1.0]);
+        }
+    }
+
+    displayMessage(message, color = [1.0, 1.0, 1.0, 1.0], attributes = TextAttr.NORMAL) {
+        if (this.mainWindow) {
+            this.mainWindow.addText(message, color, attributes);
+        }
+    }
+
+    setupKeyboardHandling() {
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                this.handleEnter();
+            } else if (e.key === 'Backspace') {
+                this.handleBackspace();
+            } else if (e.key === 'ArrowUp') {
+                this.handleHistoryNavigation(-1);
+            } else if (e.key === 'ArrowDown') {
+                this.handleHistoryNavigation(1);
+            } else if (e.key.length === 1 && !e.ctrlKey && !e.altKey) {
+                this.handleCharacterInput(e.key);
+            }
+            
+            this.updateInputDisplay();
+            e.preventDefault();
+        });
+    }
+
+    setupMouseHandling() {
+        this.tui.canvas.addEventListener('click', (e) => {
+            const rect = this.tui.canvas.getBoundingClientRect();
+            const x = Math.floor((e.clientX - rect.left) / (rect.width / this.tui.width));
+            const y = Math.floor((e.clientY - rect.top) / (rect.height / this.tui.height));
+            
+            // Find clicked window
+            for (let i = this.tui.windows.length - 1; i >= 0; i--) {
+                const window = this.tui.windows[i];
+                if (window.contains(x, y)) {
+                    window.focused = true;
+                    this.tui.windows.forEach(w => {
+                        if (w !== window) w.focused = false;
+                    });
+                    break;
+                }
+            }
+        });
+    }
+
+    handleBackspace() {
+        if (this.cursorPosition > 0) {
+            this.inputBuffer = this.inputBuffer.slice(0, this.cursorPosition - 1) + 
+                            this.inputBuffer.slice(this.cursorPosition);
+            this.cursorPosition--;
+        }
+    }
+
+    handleHistoryNavigation(direction) {
+        if (direction < 0 && this.historyIndex < this.inputHistory.length - 1) {
+            this.historyIndex++;
+        } else if (direction > 0 && this.historyIndex >= 0) {
+            this.historyIndex--;
+        }
+
+        if (this.historyIndex >= 0) {
+            this.inputBuffer = this.inputHistory[this.inputHistory.length - 1 - this.historyIndex];
+            this.cursorPosition = this.inputBuffer.length;
+        } else {
+            this.inputBuffer = '';
+            this.cursorPosition = 0;
+        }
+    }
+
+    handleCharacterInput(char) {
+        this.inputBuffer = this.inputBuffer.slice(0, this.cursorPosition) + 
+                        char + 
+                        this.inputBuffer.slice(this.cursorPosition);
+        this.cursorPosition++;
+    }
+
+    updateInputDisplay() {
+        // Find input window
+        const inputWindow = this.tui.windows.find(w => w.title === "Input");
+        if (inputWindow) {
+            // Clear input area
+            for (let x = inputWindow.x + 1; x < inputWindow.x + inputWindow.width - 1; x++) {
+                this.tui.setText(x, inputWindow.y + 1, ' ', [1, 1, 1, 1]);
+            }
+            
+            // Draw input text
+            if (this.inputBuffer) {
+                this.tui.setText(
+                    inputWindow.x + 1,
+                    inputWindow.y + 1,
+                    this.inputBuffer,
+                    [1, 1, 1, 1]
+                );
+            }
+            
+            // Draw cursor
+            this.tui.setText(
+                inputWindow.x + 1 + this.cursorPosition,
+                inputWindow.y + 1,
+                '█',
+                [1, 1, 1, 0.5]
+            );
+        }
+    }
+}
+
+async function main() {
+    const statusEl = document.getElementById('status');
+    try {
+        const canvas = document.createElement('canvas');
+        
+        canvas.width = 1280;
+        canvas.height = 900;
+        document.body.appendChild(canvas);
+
+        const tui = new WebGPUTUI(canvas, 80, 36);
+        await tui.initialize();
+        
+        const mainWindow = tui.createWindow(2, 1, 60, 25, "Main Chat");
+        mainWindow.focused = true;
+        
+        const channelWindow = tui.createWindow(64, 1, 14, 15, "Channels");
+        
+        const userWindow = tui.createWindow(64, 17, 14, 10, "Users");
+        
+        const inputWindow = tui.createWindow(2, 27, 76, 3, "Input");
+
+        tui.inputHandler = new InputHandler(tui);
+
+        mainWindow.addText("Welcome to mebyz WebGPU mIRC :)", [0.3, 0.7, 1.0, 1.0], TextAttr.BOLD);
+        mainWindow.addText("* User has joined the channel", [0.2, 0.8, 0.2, 1.0]);
+        mainWindow.addText("<User1> Hello everyone!", [1.0, 1.0, 1.0, 1.0]);
+
+        channelWindow.addText("#general", [0.0, 0.0, 0.8, 1.0], TextAttr.BOLD);
+        channelWindow.addText("#help", [0.8, 0.8, 0.8, 1.0]);
+        channelWindow.addText("#webgpu", [0.8, 0.8, 0.8, 1.0]);
+
+        userWindow.addText("@Admin", [0.0, 0.0, 0.8, 1.0], TextAttr.BOLD);
+        userWindow.addText("+User", [1.0, 1.0, 1.0, 1.0]);
+        userWindow.addText("+User2", [1.0, 1.0, 1.0, 1.0]);
+
+        function render() {
+            tui.updateAnimations();
+            tui.render();
+            requestAnimationFrame(render);
+        }
+        render();
+
+        statusEl.textContent = 'WebGPU mIRC Ready!';
+        statusEl.style.color = '#0f0';
+
+    } catch (error) {
+        console.error('Error in main:', error);
+        statusEl.textContent = 'Error: ' + error.message;
+        statusEl.style.color = 'red';
+    }
+}
+
+main();

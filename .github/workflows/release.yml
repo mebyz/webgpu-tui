@@ -1,0 +1,103 @@
+name: Release
+on:
+  push:
+    branches:
+      - dev
+
+jobs:
+  release:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo add-apt-repository -y ppa:webkit-team/ppa
+          sudo apt-get install -y build-essential \
+          curl \
+          wget \
+          libssl-dev \
+          libgtk-3-dev \
+          libayatana-appindicator3-dev \
+          librsvg2-dev \
+          libwebkit2gtk-4.1-dev \
+          libjavascriptcoregtk-4.1-dev \
+          libsoup-3.0 \
+          libsoup2.4-dev \
+          webkit2gtk-4.1 \
+          patchelf cmake ninja-build python3 gperf \
+          libgdk-pixbuf2.0-0
+          # Download missing dependencies
+          wget http://ftp.debian.org/debian/pool/main/e/enchant/libenchant1c2a_1.6.0-11.1+b1_amd64.deb
+          wget http://ftp.debian.org/debian/pool/main/libj/libjpeg-turbo/libjpeg62-turbo_2.1.5-2_amd64.deb
+          wget http://launchpadlibrarian.net/542820684/libwebp6_0.6.1-2.1_amd64.deb
+          # Install downloaded dependencies
+          sudo dpkg -i libenchant1c2a_1.6.0-11.1+b1_amd64.deb
+          sudo dpkg -i libjpeg62-turbo_2.1.5-2_amd64.deb
+          sudo dpkg -i libwebp6_0.6.1-2.1_amd64.deb
+          # Install libicu63
+          wget http://launchpadlibrarian.net/427561249/libicu63_63.2-2_amd64.deb
+          sudo dpkg -i libicu63_63.2-2_amd64.deb
+          # Install javascriptcoregtk packages
+          wget http://security.debian.org/debian-security/pool/updates/main/w/webkit2gtk/libjavascriptcoregtk-4.0-18_2.38.6-0+deb10u1_amd64.deb
+          wget http://security.debian.org/debian-security/pool/updates/main/w/webkit2gtk/gir1.2-javascriptcoregtk-4.0_2.38.6-0+deb10u1_amd64.deb
+          wget http://security.debian.org/debian-security/pool/updates/main/w/webkit2gtk/libjavascriptcoregtk-4.0-dev_2.38.6-0+deb10u1_amd64.deb
+          # Install webkit2gtk packages
+          wget http://security.debian.org/debian-security/pool/updates/main/w/webkit2gtk/libwebkit2gtk-4.0-37_2.38.6-0+deb10u1_amd64.deb
+          wget http://security.debian.org/debian-security/pool/updates/main/w/webkit2gtk/gir1.2-webkit2-4.0_2.38.6-0+deb10u1_amd64.deb
+          wget http://security.debian.org/debian-security/pool/updates/main/w/webkit2gtk/libwebkit2gtk-4.0-dev_2.38.6-0+deb10u1_amd64.deb
+          # Install all packages in order
+          sudo dpkg -i libjavascriptcoregtk-4.0-18_2.38.6-0+deb10u1_amd64.deb
+          sudo dpkg -i gir1.2-javascriptcoregtk-4.0_2.38.6-0+deb10u1_amd64.deb
+          sudo dpkg -i libjavascriptcoregtk-4.0-dev_2.38.6-0+deb10u1_amd64.deb
+          sudo dpkg -i libwebkit2gtk-4.0-37_2.38.6-0+deb10u1_amd64.deb
+          sudo dpkg -i gir1.2-webkit2-4.0_2.38.6-0+deb10u1_amd64.deb
+          sudo dpkg -i libwebkit2gtk-4.0-dev_2.38.6-0+deb10u1_amd64.deb
+          sudo apt-get install -f
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      - name: Setup PKG_CONFIG_PATH (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig" >> $GITHUB_ENV
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build Rust
+        shell: bash
+        run: |
+          cd src-tauri
+          export OUT_DIR="${GITHUB_WORKSPACE}/target/release" && cargo build --release
+          cd ..
+      
+      - name: Build the app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OUT_DIR: target/release
+        with:
+          tagName: v__VERSION__
+          releaseName: 'App v__VERSION__'
+          releaseBody: 'See the assets to download and install this version.'
+          releaseDraft: true
+          prerelease: false
